@@ -2,7 +2,11 @@ include_guard(GLOBAL)
 
 message(STATUS "[AYON] Configuring resolver dependencies for standalone USD...")
 
-find_package(Boost REQUIRED)
+# USD 21.11+ ships its own pxr_boost::python; the wrappers select it via the
+# #else branch when AYON_USE_BOOST/AYON_USE_HBOOST are undefined. A system Boost
+# is therefore not required for a standalone USD build. Look for it but don't
+# fail if it's absent.
+find_package(Boost QUIET)
 set(AR_BOOST_INCLUDE_DIR "${Boost_INCLUDE_DIRS}")
 
 if(NOT Python_FOUND)

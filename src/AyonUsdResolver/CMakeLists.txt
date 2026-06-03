@@ -16,13 +16,32 @@ set(RESOLVER_SRCS
     helpers/resolutionFunctions.cpp
     cache/assetIdentifierDef.cpp
     cache/resolverContextCache.cpp
+    cache/redisResolveCache.cpp
     helpers/ayonApiGet.cpp
     prefetch/prewarm.cpp
 )
 
+# Vendored hiredis (synchronous client only) compiled as a small static lib. Built from
+# source directly rather than via redis-plus-plus to avoid find_package/in-tree friction.
+set(HIREDIS_DIR "${CMAKE_SOURCE_DIR}/ext/hiredis")
+add_library(ayon_hiredis STATIC
+    "${HIREDIS_DIR}/alloc.c"
+    "${HIREDIS_DIR}/hiredis.c"
+    "${HIREDIS_DIR}/net.c"
+    "${HIREDIS_DIR}/read.c"
+    "${HIREDIS_DIR}/sds.c"
+    "${HIREDIS_DIR}/sockcompat.c"
+    "${HIREDIS_DIR}/async.c"
+    "${HIREDIS_DIR}/dict.c"
+)
+set_target_properties(ayon_hiredis PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(ayon_hiredis PUBLIC "${CMAKE_SOURCE_DIR}/ext")
+
 add_library(${CORE_LIB_TARGET} SHARED ${RESOLVER_SRCS})
 target_link_libraries(${CORE_LIB_TARGET} PRIVATE AyonResolver::DccDeps)
+target_link_libraries(${CORE_LIB_TARGET} PRIVATE ayon_hiredis)
 target_include_directories(${CORE_LIB_TARGET} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(${CORE_LIB_TARGET} PRIVATE "${CMAKE_SOURCE_DIR}/ext")
 set_target_properties(${CORE_LIB_TARGET} PROPERTIES PREFIX "" OUTPUT_NAME "ayonUsdResolver")
 
 if(UNIX)

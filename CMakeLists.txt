@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(AyonUsdResolverProject LANGUAGES CXX)
+project(AyonUsdResolverProject LANGUAGES C CXX)
 
 # --------------------------------------------------------
 # Make sure our custom FindUSD.cmake overrides Houdini's

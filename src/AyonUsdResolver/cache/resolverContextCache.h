@@ -2,6 +2,7 @@
 #define AR_AYONUSDRESOLVER_RESOLVER_CONTEXT_CACHE_H
 
 #include "../cache/assetIdentifierDef.h"
+#include "../cache/redisResolveCache.h"
 #include "AyonCppApi.h"
 
 #include <nlohmann/json.hpp>
@@ -124,6 +125,10 @@ class ResolverContextCache {
         bool m_staticCache;
 
         std::optional<PinningFileHandler> m_pinningFileHandler;
+
+        // Region-local L2 cache (Redis). Null/disabled when AYON_RESOLVER_CACHE_URL is unset
+        // or in static (pinning) mode. Every op fails open to server resolution.
+        std::unique_ptr<RedisResolveCache> m_redisCache;
 };
 
 #endif   // AR_AYONUSDRESOLVER_RESOLVER_CONTEXT_CACHE_H

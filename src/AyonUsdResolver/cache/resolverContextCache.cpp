@@ -18,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
@@ -26,6 +27,49 @@
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
+
+namespace {
+
+// Build the region-local cache key namespace from the AYON env. The cache instance is already
+// per-region, so the prefix only needs project/platform/site to keep distinct contexts apart
+// (the resolved path is platform/site-specific because of rootReplace).
+std::string
+buildCacheKeyPrefix() {
+    const char* project = std::getenv("AYON_PROJECT_NAME");
+    const char* site = std::getenv("AYON_SITE_ID");
+#if defined(_WIN32)
+    const std::string platform = "windows";
+#elif defined(__APPLE__)
+    const std::string platform = "darwin";
+#else
+    const std::string platform = "linux";
+#endif
+    return std::string("ayon:resolve:") + (project ? project : "") + ":" + platform + ":" + (site ? site : "");
+}
+
+// Whether a resolved URI is safe to persist in the shared L2 cache. Only immutable
+// resolutions go in: an explicit version (a frozen published artifact) or `hero` (a stable,
+// in-place hardlinked path that the server resolves to a fixed `.../hero/...` location). A
+// `latest`/bare ref moves on every publish, so it is resolved live and never stored. This is
+// what lets the cache run with no per-key invalidation: the only thing that can move an
+// immutable resolution is a global change (storage-root remap or a resolve-template change),
+// handled out of band by flushing the regional Redis.
+bool
+shouldCacheUri(const std::string &uri) {
+    const std::string marker = "version=";
+    const auto pos = uri.find(marker);
+    if (pos == std::string::npos) {
+        return false;
+    }
+    std::string version = uri.substr(pos + marker.size());
+    const auto amp = version.find('&');
+    if (amp != std::string::npos) {
+        version = version.substr(0, amp);
+    }
+    return !version.empty() && version != "latest";
+}
+
+}   // namespace
 
 // TODO pinning file hanlder should construct its cache directly at construction getAssetData should not call
 // rootReplace
@@ -96,6 +140,14 @@ ResolverContextCache::ResolverContextCache(): m_AyonCache(), m_CommonCache(), m_
         m_ayon.emplace(std::move(api));
 
         m_staticCache = false;
+
+        // Optional region-local L2 cache. Disabled (no-op) when AYON_RESOLVER_CACHE_URL is unset.
+        const char* cacheUrl = std::getenv("AYON_RESOLVER_CACHE_URL");
+        m_redisCache = std::make_unique<RedisResolveCache>(cacheUrl ? cacheUrl : "", buildCacheKeyPrefix());
+        if (m_redisCache->enabled()) {
+            TF_DEBUG(AYONUSDRESOLVER_RESOLVER_CONTEXT)
+                .Msg("ResolverContextCache: region-local Redis cache enabled (%s)\n", cacheUrl);
+        }
     }
     else {
         std::map<std::string, std::string> projectRootsEnvMap = ynput::core::iostd::getEnvMap(PROJECT_ROOTS_ENV_KEY);
@@ -175,9 +227,38 @@ ResolverContextCache::batchWarm(std::vector<std::string> &uriPaths) {
         return resolved;
     }
 
-    // One batched request over the persistent keep-alive client: few round-trips,
-    // deterministic, connection reused.
-    resolved = m_ayon->get()->batchResolvePathSerial(uriPaths);
+    // L2 first: one MGET against the region-local cache, then only WAN-resolve the misses.
+    std::vector<std::string> serverMisses;
+    if (m_redisCache && m_redisCache->enabled()) {
+        resolved = m_redisCache->mget(uriPaths);
+        for (const auto &uri: uriPaths) {
+            if (resolved.find(uri) == resolved.end()) {
+                serverMisses.push_back(uri);
+            }
+        }
+    }
+    else {
+        serverMisses = uriPaths;
+    }
+
+    if (!serverMisses.empty()) {
+        // One batched request over the persistent keep-alive client: few round-trips,
+        // deterministic, connection reused.
+        std::unordered_map<std::string, std::string> serverResolved
+            = m_ayon->get()->batchResolvePathSerial(serverMisses);
+
+        std::vector<std::pair<std::string, std::string>> writeBack;
+        for (const auto &entry: serverResolved) {
+            resolved.emplace(entry.first, entry.second);
+            if (m_redisCache && m_redisCache->enabled() && !entry.second.empty()
+                && shouldCacheUri(entry.first)) {
+                writeBack.emplace_back(entry.first, entry.second);
+            }
+        }
+        if (!writeBack.empty()) {
+            m_redisCache->mset(writeBack);
+        }
+    }
 
     for (const auto &entry: resolved) {
         if (entry.first.empty() || entry.second.empty()) {
@@ -258,12 +339,32 @@ ResolverContextCache::getAsset(const std::string &assetIdentifier,
 
     TF_DEBUG(AYONUSDRESOLVER_RESOLVER_CONTEXT).Msg("ResolverContextCache::getAsset: No Cache Hit \n");
     if (isAyonPath) {
+        // L2: region-local Redis before the WAN call to the AYON server.
+        if (m_redisCache && m_redisCache->enabled()) {
+            std::optional<std::string> l2Hit = m_redisCache->get(assetIdentifier);
+            if (l2Hit && !l2Hit->empty()) {
+                asset.setAssetIdentifier(assetIdentifier);
+                asset.setResolvedAssetPath(*l2Hit);
+                TF_DEBUG(AYONUSDRESOLVER_RESOLVER_CONTEXT).Msg("ResolverContextCache::getAsset: Redis L2 hit \n");
+                this->insert(asset);
+                return asset;
+            }
+        }
+
         std::pair<std::string, std::string> resolvedAsset = m_ayon->get()->resolvePath(assetIdentifier);
 
-        asset.setAssetIdentifier(std::move(resolvedAsset.first));
-        asset.setResolvedAssetPath(std::move(resolvedAsset.second));
+        asset.setAssetIdentifier(resolvedAsset.first);
+        asset.setResolvedAssetPath(resolvedAsset.second);
 
         TF_DEBUG(AYONUSDRESOLVER_RESOLVER_CONTEXT).Msg("ResolverContextCache::getAsset: called ayon.resolvePath() \n");
+
+        // Write-through to L2, but only for immutable resolutions (explicit version or hero),
+        // so the shared cache never holds a ref that can move on publish.
+        if (m_redisCache && m_redisCache->enabled() && !resolvedAsset.first.empty()
+            && !resolvedAsset.second.empty() && shouldCacheUri(resolvedAsset.first)) {
+            m_redisCache->set(resolvedAsset.first, resolvedAsset.second);
+        }
+
         this->insert(asset);
     }
     else {

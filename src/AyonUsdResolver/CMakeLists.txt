@@ -3,6 +3,8 @@ set(PYTHON_MOD_TARGET AyonUsdResolver_python)
 
 if(WIN32)
     set(AR_ARCH_LIB_SUFFIX "dll")
+elseif(APPLE)
+    set(AR_ARCH_LIB_SUFFIX "dylib")
 else()
     set(AR_ARCH_LIB_SUFFIX "so")
 endif()
@@ -24,7 +26,7 @@ target_link_libraries(${CORE_LIB_TARGET} PRIVATE AyonResolver::DccDeps)
 target_include_directories(${CORE_LIB_TARGET} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 set_target_properties(${CORE_LIB_TARGET} PROPERTIES PREFIX "" OUTPUT_NAME "ayonUsdResolver")
 
-if(UNIX)
+if(UNIX AND NOT APPLE)
     target_link_options(${CORE_LIB_TARGET} PRIVATE "LINKER:--no-undefined")
 endif()
 
@@ -53,7 +55,7 @@ target_link_libraries(${PYTHON_MOD_TARGET}
 target_include_directories(${PYTHON_MOD_TARGET} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_definitions(${PYTHON_MOD_TARGET} PRIVATE AR_AYONUSDRESOLVER_EXPORTS)
 
-if(UNIX)
+if(UNIX AND NOT APPLE)
     target_link_options(${PYTHON_MOD_TARGET} PRIVATE "LINKER:--no-undefined")
 endif()
 

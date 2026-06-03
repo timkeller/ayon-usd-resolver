@@ -30,13 +30,15 @@ if(Python_FOUND AND NOT TARGET Python::Python AND Python_LIBRARIES)
 endif()
 
 set(AYON_RESOLVER_EXTRA_USD_LIBS "")
-if(USD_IS_HOUDINI OR BUILD_TARGET STREQUAL "maya")
+if(USD_IS_HOUDINI OR BUILD_TARGET STREQUAL "maya" OR BUILD_TARGET STREQUAL "usd")
     set(_ayon_usd_prefix "${USD_LIB_PREFIX}")
     if(NOT _ayon_usd_prefix)
         set(_ayon_usd_prefix "usd")
     endif()
 
-    foreach(_libname sdf vt pcp)
+    # sdf/vt/pcp: directly referenced by resolverContext. python: provides the
+    # pxr_boost::python runtime used by the Ar context's GetPythonObj wrappers.
+    foreach(_libname sdf vt pcp python)
         find_library(_ayon_usd_lib_found
             NAMES ${_ayon_usd_prefix}_${_libname} lib${_ayon_usd_prefix}_${_libname}
             PATHS "${USD_LIB_DIR}"
